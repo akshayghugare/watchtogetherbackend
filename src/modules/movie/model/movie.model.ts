@@ -16,14 +16,35 @@ export interface MovieAttributes {
   sizeBytes: number | null;
   durationSec: number | null;
   uploaderId: string;
+  // Binary payloads stored in the DB (excluded from queries by default —
+  // served in chunks by the /media streaming endpoints).
+  fileData?: Buffer | null;
+  thumbnailData?: Buffer | null;
+  thumbnailMime?: string | null;
+  subtitleData?: Buffer | null;
+  subtitleMime?: string | null;
   createdAt?: Date;
   updatedAt?: Date;
 }
 
 export type MovieCreationAttributes = Optional<
   MovieAttributes,
-  "id" | "description" | "source" | "thumbnailUrl" | "subtitleUrl" | "mimeType" | "sizeBytes" | "durationSec"
+  | "id"
+  | "description"
+  | "source"
+  | "thumbnailUrl"
+  | "subtitleUrl"
+  | "mimeType"
+  | "sizeBytes"
+  | "durationSec"
+  | "fileData"
+  | "thumbnailData"
+  | "thumbnailMime"
+  | "subtitleData"
+  | "subtitleMime"
 >;
+
+export const MOVIE_BLOB_ATTRS = ["fileData", "thumbnailData", "subtitleData"] as const;
 
 export class Movie
   extends Model<MovieAttributes, MovieCreationAttributes>
@@ -40,6 +61,11 @@ export class Movie
   declare sizeBytes: number | null;
   declare durationSec: number | null;
   declare uploaderId: string;
+  declare fileData?: Buffer | null;
+  declare thumbnailData?: Buffer | null;
+  declare thumbnailMime?: string | null;
+  declare subtitleData?: Buffer | null;
+  declare subtitleMime?: string | null;
   declare readonly createdAt: Date;
 
   declare uploader?: User;
@@ -67,12 +93,20 @@ Movie.init(
       references: { model: "users", key: "id" },
       onDelete: "CASCADE",
     },
+    fileData: { type: DataTypes.BLOB, allowNull: true },
+    thumbnailData: { type: DataTypes.BLOB, allowNull: true },
+    thumbnailMime: { type: DataTypes.STRING(100), allowNull: true },
+    subtitleData: { type: DataTypes.BLOB, allowNull: true },
+    subtitleMime: { type: DataTypes.STRING(100), allowNull: true },
   },
   {
     sequelize,
     modelName: "Movie",
     tableName: "movies",
     indexes: [{ fields: ["uploader_id"] }],
+    // Never drag multi-hundred-MB blobs into ordinary queries (room lists,
+    // includes, etc.) — the /media endpoints fetch them in slices.
+    defaultScope: { attributes: { exclude: [...MOVIE_BLOB_ATTRS] } },
   },
 );
 

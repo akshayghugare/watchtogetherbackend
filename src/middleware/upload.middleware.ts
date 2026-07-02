@@ -30,9 +30,13 @@ const VIDEO_EXT = new Set(['.mp4', '.webm', '.mkv', '.mov']);
 const SUBTITLE_EXT = new Set(['.srt', '.vtt']);
 const IMAGE_MIME = new Set(['image/jpeg', 'image/png', 'image/webp']);
 
-/** Movie upload: video file + optional thumbnail + optional subtitle. */
+/**
+ * Movie upload: video file + optional thumbnail + optional subtitle.
+ * Kept in memory — the payload is persisted into the database (movies table),
+ * not the local uploads folder.
+ */
 export const movieUpload = multer({
-  storage: diskStorage('movies'),
+  storage: multer.memoryStorage(),
   limits: { fileSize: env.MAX_MOVIE_SIZE_MB * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase();

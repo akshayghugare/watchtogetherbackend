@@ -7,6 +7,7 @@ import compression from 'compression';
 import cookieParser from 'cookie-parser';
 import { env } from './config/env';
 import routes from './routes';
+import mediaRoutes from './modules/movie/movie.media.routes';
 import { apiLimiter } from './middleware/rateLimit.middleware';
 import { errorHandler, notFoundHandler } from './middleware/error.middleware';
 
@@ -29,8 +30,12 @@ app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 app.use(cookieParser());
 app.use(compression());
 
-// Static uploads (avatars, thumbnails, movie files in later modules)
+// Static uploads (avatars, chat files; legacy movie files uploaded before DB storage)
 app.use('/uploads', express.static(path.join(process.cwd(), env.UPLOAD_DIR)));
+
+// DB-stored movie files/thumbnails/subtitles — outside the API rate limiter,
+// since video seeking fires many small range requests.
+app.use('/media', mediaRoutes);
 
 // API
 app.use(env.API_PREFIX, apiLimiter, routes);

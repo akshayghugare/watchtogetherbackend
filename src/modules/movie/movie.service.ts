@@ -1,11 +1,11 @@
 import fs from "fs/promises";
 import path from "path";
+import { randomUUID } from "crypto";
 import Movie from "./model/movie.model";
 import User from "../user/model/user.model";
 import { env } from "../../config/env";
 import { ApiError } from "../../utils/ApiError";
 import { logger } from "../../utils/logger";
-import { localFileUrl } from "../../middleware/upload.middleware";
 import { logActivity } from "../admin/admin.service";
 
 const UPLOADER_ATTRS = ["id", "username", "displayName", "avatarUrl"] as const;
@@ -27,20 +27,28 @@ export async function createMovie(uploaderId: string, input: CreateMovieInput) {
     throw ApiError.badRequest("Provide a movie file or a stream URL.");
   }
 
+  const thumbFile = input.files?.thumbnail?.[0];
+  const subFile = input.files?.subtitle?.[0];
+  const subExt = subFile ? path.extname(subFile.originalname).toLowerCase() : "";
+
+  // Files live in the DB; the /media endpoints stream them back out.
+  const id = randomUUID();
   const movie = await Movie.create({
+    id,
     title: input.title,
     description: input.description ?? null,
     source: videoFile ? "UPLOAD" : "URL",
-    fileUrl: videoFile ? localFileUrl("movies", videoFile.filename) : input.url!,
-    thumbnailUrl: input.files?.thumbnail?.[0]
-      ? localFileUrl("movies", input.files.thumbnail[0].filename)
-      : null,
-    subtitleUrl: input.files?.subtitle?.[0]
-      ? localFileUrl("movies", input.files.subtitle[0].filename)
-      : null,
+    fileUrl: videoFile ? `/media/movies/${id}/stream` : input.url!,
+    thumbnailUrl: thumbFile ? `/media/movies/${id}/thumbnail` : null,
+    subtitleUrl: subFile ? `/media/movies/${id}/subtitle${subExt}` : null,
     mimeType: videoFile?.mimetype ?? null,
     sizeBytes: videoFile?.size ?? null,
     uploaderId,
+    fileData: videoFile?.buffer ?? null,
+    thumbnailData: thumbFile?.buffer ?? null,
+    thumbnailMime: thumbFile?.mimetype ?? null,
+    subtitleData: subFile?.buffer ?? null,
+    subtitleMime: subFile ? (subExt === ".vtt" ? "text/vtt" : "application/x-subrip") : null,
   });
   await logActivity("movie.uploaded", {
     userId: uploaderId,
