@@ -31,6 +31,11 @@ export const transferHostSchema = z.object({
   body: z.object({ newHostId: z.string().uuid() }),
 });
 
+export const changeMovieSchema = z.object({
+  params: z.object({ roomId: z.string().uuid() }),
+  body: z.object({ movieId: z.string().uuid() }),
+});
+
 export const inviteSchema = z.object({
   params: z.object({ roomId: z.string().uuid() }),
   body: z.object({ friendId: z.string().uuid() }),

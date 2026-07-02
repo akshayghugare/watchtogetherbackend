@@ -262,6 +262,37 @@ export async function inviteToRoom(userId: string, roomId: string, friendId: str
   });
 }
 
+/** Host swaps the room's video mid-session; playback resets to a paused start. */
+export async function changeRoomMovie(hostId: string, roomId: string, movieId: string) {
+  const room = await Room.findByPk(roomId);
+  if (!room || !room.isActive) throw ApiError.notFound("Room not found or has ended.");
+  if (room.hostId !== hostId) throw ApiError.forbidden("Only the host can change the video.");
+
+  const movie = await Movie.findByPk(movieId);
+  if (!movie) throw ApiError.notFound("Movie not found.");
+
+  await room.update({
+    movieId,
+    playbackPositionSec: 0,
+    isPlaying: false,
+    playbackRate: 1,
+    playbackUpdatedAt: new Date(),
+  });
+  await logActivity("room.movie_changed", {
+    userId: hostId,
+    entity: "room",
+    entityId: roomId,
+    metadata: { movieId, title: movie.title },
+  });
+
+  getIo()?.to(`room:${roomId}`).emit("room:movie-changed", {
+    roomId,
+    movieId,
+    movieTitle: movie.title,
+  });
+  return getRoom(roomId);
+}
+
 export async function endRoom(hostId: string, roomId: string) {
   const room = await Room.findByPk(roomId);
   if (!room) throw ApiError.notFound("Room not found.");

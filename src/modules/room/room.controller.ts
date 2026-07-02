@@ -63,6 +63,15 @@ export const invite = asyncHandler(async (req: Request, res: Response) => {
   sendResponse(res, HTTP_STATUS.OK, "Invitation sent.");
 });
 
+export const changeMovie = asyncHandler(async (req: Request, res: Response) => {
+  const room = await roomService.changeRoomMovie(
+    req.user!.id,
+    req.params.roomId,
+    req.body.movieId,
+  );
+  sendResponse(res, HTTP_STATUS.OK, "Room video changed.", { room });
+});
+
 export const end = asyncHandler(async (req: Request, res: Response) => {
   await roomService.endRoom(req.user!.id, req.params.roomId);
   sendResponse(res, HTTP_STATUS.OK, "Room ended.");

@@ -1,6 +1,7 @@
 import { Router } from "express";
 import * as controller from "./room.controller";
 import {
+  changeMovieSchema,
   createRoomSchema,
   inviteSchema,
   joinRoomSchema,
@@ -24,6 +25,7 @@ router.post("/:roomId/leave", validate(roomIdSchema), controller.leave);
 router.post("/:roomId/kick", validate(kickSchema), controller.kick);
 router.post("/:roomId/transfer-host", validate(transferHostSchema), controller.transferHost);
 router.post("/:roomId/invite", validate(inviteSchema), controller.invite);
+router.patch("/:roomId/movie", validate(changeMovieSchema), controller.changeMovie);
 router.post("/:roomId/end", validate(roomIdSchema), controller.end);
 router.get("/:roomId/progress", validate(roomIdSchema), controller.myProgress);
 
