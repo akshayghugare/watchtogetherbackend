@@ -6,6 +6,7 @@ import "./modules/friend/model/friendship.model";
 import "./modules/movie/model/movie.model";
 import "./modules/room/model/room.model";
 import "./modules/room/model/room-member.model";
+import "./modules/room/model/room-invite.model";
 import "./modules/room/model/video-progress.model";
 import "./modules/chat/model/chat-message.model";
 import "./modules/chat/model/message-reaction.model";

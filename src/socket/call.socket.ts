@@ -2,8 +2,17 @@ import type { Server, Socket } from "socket.io";
 import { Op } from "sequelize";
 import CallHistory from "../modules/call/model/call-history.model";
 import CallParticipant from "../modules/call/model/call-participant.model";
+import Room from "../modules/room/model/room.model";
+import RoomMember from "../modules/room/model/room-member.model";
 import User from "../modules/user/model/user.model";
 import { logActivity } from "../modules/admin/admin.service";
+import {
+  clearMediaState,
+  clearScreenShare,
+  getScreenShare,
+  setMediaState,
+  setScreenShare,
+} from "./screen-share";
 import { logger } from "../utils/logger";
 
 type Ack = (response: { ok: boolean; error?: string; [k: string]: unknown }) => void;
@@ -68,6 +77,16 @@ export function registerCallHandlers(io: Server, socket: Socket): void {
     "call:join",
     async ({ roomId, type }: { roomId: string; type: "AUDIO" | "VIDEO" }, ack?: Ack) => {
       try {
+        // Only active members of an active room may enter the call mesh.
+        const [room, member] = await Promise.all([
+          Room.findByPk(roomId),
+          RoomMember.findOne({ where: { roomId, userId, leftAt: null, isKicked: false } }),
+        ]);
+        if (!room || !room.isActive || !member) {
+          ack?.({ ok: false, error: "You are not authorized to join this call." });
+          return;
+        }
+
         // Everyone already in the call — the newcomer initiates offers to them.
         const existing = await io.in(`call:${roomId}`).fetchSockets();
         const peers = (
@@ -119,14 +138,50 @@ export function registerCallHandlers(io: Server, socket: Socket): void {
   /** Mute / camera / screen-share indicators for remote UIs. */
   socket.on(
     "call:media-state",
-    (state: { roomId: string; audio: boolean; video: boolean; screen: boolean }) => {
-      socket.to(`call:${state.roomId}`).emit("call:media-state", {
+    async (state: { roomId: string; audio: boolean; video: boolean; screen: boolean }) => {
+      // Only sockets that actually joined the call may broadcast media state.
+      if (!(socket.data.callRoomIds ?? []).includes(state.roomId)) return;
+
+      const payload = {
         socketId: socket.id,
         userId,
-        audio: state.audio,
-        video: state.video,
-        screen: state.screen,
-      });
+        audio: Boolean(state.audio),
+        video: Boolean(state.video),
+        screen: Boolean(state.screen),
+      };
+      setMediaState({ roomId: state.roomId, ...payload });
+      socket.to(`call:${state.roomId}`).emit("call:media-state", payload);
+
+      // Keep the room-wide screen-share state in sync so every room member
+      // (even outside the call) can switch to the screen-share view.
+      const current = getScreenShare(state.roomId);
+      if (payload.screen && current?.socketId !== socket.id) {
+        const user = await User.findByPk(userId, {
+          attributes: ["id", "username", "displayName"],
+        }).catch(() => null);
+        const info = {
+          roomId: state.roomId,
+          userId,
+          socketId: socket.id,
+          username: user?.displayName ?? user?.username ?? null,
+          startedAt: new Date(),
+        };
+        setScreenShare(info);
+        io.to(`room:${state.roomId}`).emit("screen:share-state", {
+          roomId: state.roomId,
+          sharing: true,
+          userId: info.userId,
+          username: info.username,
+        });
+      } else if (!payload.screen && current?.socketId === socket.id) {
+        clearScreenShare(state.roomId);
+        io.to(`room:${state.roomId}`).emit("screen:share-state", {
+          roomId: state.roomId,
+          sharing: false,
+          userId,
+          username: null,
+        });
+      }
     },
   );
 
@@ -136,6 +191,18 @@ export function registerCallHandlers(io: Server, socket: Socket): void {
       (id: string) => id !== roomId,
     );
     socket.to(`call:${roomId}`).emit("call:peer-left", { socketId: socket.id, userId });
+
+    clearMediaState(socket.id);
+    // A presenter leaving ends the room's screen share for everyone.
+    if (getScreenShare(roomId)?.socketId === socket.id) {
+      clearScreenShare(roomId);
+      io.to(`room:${roomId}`).emit("screen:share-state", {
+        roomId,
+        sharing: false,
+        userId,
+        username: null,
+      });
+    }
 
     const callId = activeCalls.get(roomId);
     if (callId) {

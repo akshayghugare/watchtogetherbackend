@@ -15,7 +15,10 @@ export const create = asyncHandler(async (req: Request, res: Response) => {
 export const listPublic = asyncHandler(async (req: Request, res: Response) => {
   const page = Math.max(1, Number(req.query.page) || 1);
   const limit = Math.min(50, Number(req.query.limit) || 12);
-  const { rooms, total } = await roomService.listPublicRooms(page, limit);
+  const { rooms, total } = await roomService.listPublicRooms(page, limit, {
+    id: req.user!.id,
+    role: req.user!.role,
+  });
   sendResponse(res, HTTP_STATUS.OK, "OK", { rooms }, {
     page,
     limit,
@@ -30,7 +33,10 @@ export const listMine = asyncHandler(async (req: Request, res: Response) => {
 });
 
 export const getOne = asyncHandler(async (req: Request, res: Response) => {
-  const room = await roomService.getRoom(req.params.roomId);
+  const room = await roomService.getRoom(req.params.roomId, {
+    id: req.user!.id,
+    role: req.user!.role,
+  });
   sendResponse(res, HTTP_STATUS.OK, "OK", { room });
 });
 
@@ -39,6 +45,7 @@ export const join = asyncHandler(async (req: Request, res: Response) => {
     req.user!.id,
     req.body.roomIdOrCode,
     req.body.password,
+    req.user!.role,
   );
   sendResponse(res, HTTP_STATUS.OK, "Joined room.", { room });
 });

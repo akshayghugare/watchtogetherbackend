@@ -2,12 +2,14 @@ import type { Server, Socket } from "socket.io";
 import { Op } from "sequelize";
 import Room from "../modules/room/model/room.model";
 import RoomMember from "../modules/room/model/room-member.model";
+import RoomInvite from "../modules/room/model/room-invite.model";
 import User from "../modules/user/model/user.model";
 import Movie from "../modules/movie/model/movie.model";
 import Notification from "../modules/notification/model/notification.model";
 import { saveProgress } from "../modules/room/room.service";
 import { getFriendIds } from "../modules/friend/friend.service";
 import { notifyUsers } from "../modules/notification/notification.service";
+import { getScreenShare } from "./screen-share";
 import { logger } from "../utils/logger";
 
 type Ack = (response: { ok: boolean; error?: string; [k: string]: unknown }) => void;
@@ -60,7 +62,16 @@ async function notifyFriendsOnFirstPlay(room: Room, hostId: string): Promise<voi
     RoomMember.findAll({ where: { roomId: room.id, leftAt: null }, attributes: ["userId"] }),
   ]);
   const inRoom = new Set(activeMembers.map((m) => m.userId));
-  const recipients = friendIds.filter((id) => !inRoom.has(id));
+  let recipients = friendIds.filter((id) => !inRoom.has(id));
+  // Private rooms stay invisible to non-invited users — even in notifications.
+  if (room.privacy === "PRIVATE") {
+    const invites = await RoomInvite.findAll({
+      where: { roomId: room.id },
+      attributes: ["userId"],
+    });
+    const invited = new Set(invites.map((i) => i.userId));
+    recipients = recipients.filter((id) => invited.has(id));
+  }
   if (recipients.length === 0) return;
 
   await notifyUsers(recipients, {
@@ -91,6 +102,17 @@ export function registerRoomHandlers(io: Server, socket: Socket): void {
         attributes: ["id", "username", "displayName", "avatarUrl", "isOnline"],
       });
       socket.to(`room:${roomId}`).emit("room:member-joined", { user: user?.toJSON() });
+
+      // Late joiners immediately learn about an active screen share.
+      const share = getScreenShare(roomId);
+      if (share) {
+        socket.emit("screen:share-state", {
+          roomId,
+          sharing: true,
+          userId: share.userId,
+          username: share.username,
+        });
+      }
 
       ack?.({ ok: true, playback: playbackState(room) });
     } catch (err) {

@@ -7,6 +7,7 @@ export const createRoomSchema = z.object({
     privacy: z.enum(["PUBLIC", "PRIVATE"]).optional(),
     password: z.string().min(4).max(64).optional().or(z.literal("")),
     maxMembers: z.coerce.number().int().min(2).max(100).optional(),
+    invitedUserIds: z.array(z.string().uuid()).max(100).optional(),
   }),
 });
 

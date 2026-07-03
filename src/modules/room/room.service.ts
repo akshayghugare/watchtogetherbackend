@@ -2,6 +2,7 @@ import bcrypt from "bcrypt";
 import { Op } from "sequelize";
 import Room from "./model/room.model";
 import RoomMember from "./model/room-member.model";
+import RoomInvite from "./model/room-invite.model";
 import VideoProgress from "./model/video-progress.model";
 import Movie from "../movie/model/movie.model";
 import User from "../user/model/user.model";
@@ -25,7 +26,33 @@ const roomInclude = [
     required: false,
     include: [{ model: User, as: "user", attributes: [...MEMBER_USER_ATTRS] }],
   },
+  {
+    model: RoomInvite,
+    as: "invites",
+    required: false,
+    include: [{ model: User, as: "user", attributes: [...MEMBER_USER_ATTRS] }],
+  },
 ];
+
+/**
+ * Room access rule: the host, invited users and admins always pass.
+ * PUBLIC rooms additionally open up to the host's friends; PRIVATE rooms
+ * never do. Users with no relation to the host can't access anything.
+ */
+export async function canAccessRoom(
+  room: Room,
+  userId: string,
+  role?: string,
+): Promise<boolean> {
+  if (room.hostId === userId || role === "ADMIN") return true;
+  const [invite, member] = await Promise.all([
+    RoomInvite.findOne({ where: { roomId: room.id, userId } }),
+    RoomMember.findOne({ where: { roomId: room.id, userId, isKicked: false } }),
+  ]);
+  if (invite || member) return true;
+  if (room.privacy === "PUBLIC") return areFriends(userId, room.hostId);
+  return false;
+}
 
 export function serializeRoom(room: Room) {
   const json = room.toJSON() as unknown as Record<string, unknown>;
@@ -39,6 +66,7 @@ interface CreateRoomInput {
   privacy?: "PUBLIC" | "PRIVATE";
   password?: string;
   maxMembers?: number;
+  invitedUserIds?: string[];
 }
 
 export async function createRoom(hostId: string, input: CreateRoomInput) {
@@ -67,15 +95,39 @@ export async function createRoom(hostId: string, input: CreateRoomInput) {
     metadata: { name: room.name, movieId: room.movieId },
   });
 
-  // "X started watching Y — Join now" popup for the host's friends.
-  if (room.movieId) {
-    const [host, movie, friendIds] = await Promise.all([
-      User.findByPk(hostId),
-      Movie.findByPk(room.movieId),
-      getFriendIds(hostId),
-    ]);
-    if (friendIds.length > 0) {
-      await notifyUsers(friendIds, {
+  const [host, movie, friendIds] = await Promise.all([
+    User.findByPk(hostId),
+    room.movieId ? Movie.findByPk(room.movieId) : null,
+    getFriendIds(hostId),
+  ]);
+
+  // Persist the invite allowlist — only friends of the host can be invited.
+  const friendSet = new Set(friendIds);
+  const invitedIds = [...new Set(input.invitedUserIds ?? [])].filter(
+    (id) => id !== hostId && friendSet.has(id),
+  );
+  if (invitedIds.length > 0) {
+    await RoomInvite.bulkCreate(
+      invitedIds.map((userId) => ({ roomId: room.id, userId, invitedById: hostId })),
+      { ignoreDuplicates: true },
+    );
+    await notifyUsers(invitedIds, {
+      actorId: hostId,
+      type: "ROOM_INVITE",
+      title: `${host?.displayName ?? host?.username} invited you to ${room.name}`,
+      body: movie ? `Watching: ${movie.title}` : "Join and watch together!",
+      imageUrl: movie?.thumbnailUrl ?? null,
+      data: { roomId: room.id, roomCode: room.code, movieTitle: movie?.title },
+    });
+  }
+
+  // "X started watching Y — Join now" popup. Private rooms must stay invisible
+  // to everyone but the invited users, so only public rooms broadcast to all
+  // friends (invited ones were already notified above).
+  if (room.movieId && room.privacy === "PUBLIC") {
+    const recipients = friendIds.filter((id) => !invitedIds.includes(id));
+    if (recipients.length > 0) {
+      await notifyUsers(recipients, {
         actorId: hostId,
         type: "MOVIE_STARTED",
         title: `${host?.displayName ?? host?.username} started watching ${movie?.title}`,
@@ -89,15 +141,45 @@ export async function createRoom(hostId: string, input: CreateRoomInput) {
   return getRoom(room.id);
 }
 
-export async function getRoom(roomId: string) {
+export async function getRoom(roomId: string, viewer?: { id: string; role: string }) {
   const room = await Room.findByPk(roomId, { include: roomInclude });
   if (!room) throw ApiError.notFound("Room not found.");
+  // Unauthorized users must not learn anything about a private room.
+  if (viewer && !(await canAccessRoom(room, viewer.id, viewer.role))) {
+    throw ApiError.notFound("Room not found.");
+  }
   return serializeRoom(room);
 }
 
-export async function listPublicRooms(page: number, limit: number) {
+/**
+ * Rooms the user is allowed to discover: rooms they host, rooms they were
+ * invited to and public rooms hosted by their friends. Admins see every
+ * active room. Filtering happens at the query level — unauthorized rooms
+ * never leave the DB.
+ */
+export async function listPublicRooms(
+  page: number,
+  limit: number,
+  viewer: { id: string; role: string },
+) {
+  let visibleWhere: Record<string, unknown> = { isActive: true };
+  if (viewer.role !== "ADMIN") {
+    const [invites, friendIds] = await Promise.all([
+      RoomInvite.findAll({ where: { userId: viewer.id }, attributes: ["roomId"] }),
+      getFriendIds(viewer.id),
+    ]);
+    visibleWhere = {
+      isActive: true,
+      [Op.or]: [
+        { hostId: viewer.id },
+        { id: { [Op.in]: invites.map((i) => i.roomId) } },
+        { privacy: "PUBLIC", hostId: { [Op.in]: friendIds } },
+      ],
+    };
+  }
+
   const { rows, count } = await Room.findAndCountAll({
-    where: { privacy: "PUBLIC", isActive: true },
+    where: visibleWhere,
     include: [
       { model: User, as: "host", attributes: [...MEMBER_USER_ATTRS] },
       { model: Movie, as: "movie" },
@@ -130,6 +212,7 @@ export async function joinRoom(
   userId: string,
   roomIdOrCode: string,
   password?: string,
+  role?: string,
 ) {
   const isUuid = /^[0-9a-f-]{36}$/i.test(roomIdOrCode);
   const room = await Room.findOne({
@@ -137,33 +220,41 @@ export async function joinRoom(
   });
   if (!room || !room.isActive) throw ApiError.notFound("Room not found or has ended.");
 
+  const isAdmin = role === "ADMIN";
   const existing = await RoomMember.findOne({ where: { roomId: room.id, userId } });
-  if (existing?.isKicked) throw ApiError.forbidden("You have been removed from this room.");
+  if (existing?.isKicked && !isAdmin) {
+    throw ApiError.forbidden("You have been removed from this room.");
+  }
 
   // Already an active member → idempotent re-join (page refresh etc.)
-  if (existing && !existing.leftAt) return getRoom(room.id);
+  if (existing && !existing.leftAt && !existing.isKicked) return getRoom(room.id);
 
-  // Private rooms: friends of the host or invited users pass; others need the password.
-  if (room.privacy === "PRIVATE" && room.hostId !== userId) {
-    const friendOfHost = await areFriends(userId, room.hostId);
-    if (!friendOfHost && room.passwordHash) {
-      const ok = password ? await bcrypt.compare(password, room.passwordHash) : false;
-      if (!ok) throw ApiError.forbidden("Incorrect room password.");
-    } else if (!friendOfHost && !room.passwordHash) {
-      throw ApiError.forbidden("This room is private.");
+  if (room.hostId !== userId && !isAdmin) {
+    const invite = await RoomInvite.findOne({ where: { roomId: room.id, userId } });
+    if (room.privacy === "PRIVATE") {
+      // Private rooms: invited users only — a password never substitutes
+      // for an invitation.
+      if (!invite) throw ApiError.forbidden("You are not authorized to join this room.");
+    } else {
+      // Public rooms: the host's friends and invited users only — strangers
+      // are rejected even with the room code.
+      if (!invite && !(await areFriends(userId, room.hostId))) {
+        throw ApiError.forbidden("You are not authorized to join this room.");
+      }
+      if (room.passwordHash) {
+        const ok = password ? await bcrypt.compare(password, room.passwordHash) : false;
+        if (!ok) throw ApiError.forbidden("Incorrect room password.");
+      }
     }
-  } else if (room.passwordHash && room.hostId !== userId) {
-    const ok = password ? await bcrypt.compare(password, room.passwordHash) : false;
-    if (!ok) throw ApiError.forbidden("Incorrect room password.");
   }
 
   const activeCount = await RoomMember.count({
     where: { roomId: room.id, leftAt: null, isKicked: false },
   });
-  if (activeCount >= room.maxMembers) throw ApiError.conflict("Room is full.");
+  if (activeCount >= room.maxMembers && !isAdmin) throw ApiError.conflict("Room is full.");
 
   if (existing) {
-    await existing.update({ leftAt: null });
+    await existing.update({ leftAt: null, isKicked: false });
   } else {
     await RoomMember.create({ roomId: room.id, userId, role: "MEMBER" });
   }
@@ -193,23 +284,33 @@ export async function leaveRoom(userId: string, roomId: string) {
   }
 }
 
-export async function kickMember(hostId: string, roomId: string, targetUserId: string) {
+export async function kickMember(
+  actorId: string,
+  roomId: string,
+  targetUserId: string,
+  opts: { asAdmin?: boolean } = {},
+) {
   const room = await Room.findByPk(roomId);
   if (!room) throw ApiError.notFound("Room not found.");
-  if (room.hostId !== hostId) throw ApiError.forbidden("Only the host can kick members.");
-  if (targetUserId === hostId) throw ApiError.badRequest("You cannot kick yourself.");
+  if (!opts.asAdmin && room.hostId !== actorId) {
+    throw ApiError.forbidden("Only the host can kick members.");
+  }
+  if (targetUserId === actorId) throw ApiError.badRequest("You cannot kick yourself.");
 
   const member = await RoomMember.findOne({ where: { roomId, userId: targetUserId } });
   if (!member || member.leftAt) throw ApiError.notFound("Member not found in this room.");
 
   await member.update({ isKicked: true, leftAt: new Date() });
-  await logActivity("room.member_kicked", {
-    userId: hostId,
+  await logActivity(opts.asAdmin ? "admin.room.member_kicked" : "room.member_kicked", {
+    userId: actorId,
     entity: "room",
     entityId: roomId,
     metadata: { targetUserId },
   });
-  getIo()?.to(`user:${targetUserId}`).emit("room:kicked", { roomId });
+  const io = getIo();
+  io?.to(`user:${targetUserId}`).emit("room:kicked", { roomId });
+  // Force the kicked user's sockets out of the live channels immediately.
+  io?.in(`user:${targetUserId}`).socketsLeave([`room:${roomId}`, `call:${roomId}`]);
 }
 
 async function transferHostInternal(room: Room, newHostId: string) {
@@ -247,9 +348,19 @@ export async function inviteToRoom(userId: string, roomId: string, friendId: str
 
   const member = await RoomMember.findOne({ where: { roomId, userId, leftAt: null } });
   if (!member) throw ApiError.forbidden("You are not in this room.");
+  // Access to a private room is granted only by its host.
+  if (room.privacy === "PRIVATE" && room.hostId !== userId) {
+    throw ApiError.forbidden("Only the host can invite people to a private room.");
+  }
   if (!(await areFriends(userId, friendId))) {
     throw ApiError.forbidden("You can only invite friends.");
   }
+
+  // Persist the invite so the room becomes visible/joinable for the friend.
+  await RoomInvite.findOrCreate({
+    where: { roomId, userId: friendId },
+    defaults: { roomId, userId: friendId, invitedById: userId },
+  });
 
   const inviter = await User.findByPk(userId);
   await notifyUser(friendId, {
